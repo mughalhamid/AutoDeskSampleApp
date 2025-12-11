@@ -5,6 +5,7 @@ using Autodesk.AutoCAD.Runtime;
 using System;
 using System.Windows.Forms;
 using Application = Autodesk.AutoCAD.ApplicationServices.Application;
+using Exception = System.Exception;
 
 namespace WinFormsApp1
 {
@@ -32,21 +33,41 @@ namespace WinFormsApp1
             this.Close();
         }
 
-        private void DeleteLayerEntitiesInsideArea(string layerName)
+        private void DeleteLayerEntitiesInsideArea(string layerNames)
         {
             var doc = Application.DocumentManager.MdiActiveDocument;
             var ed = doc.Editor;
 
             try
             {
-                TypedValue[] filter = new TypedValue[]
+                // Split comma separated layer names
+                var layerList = layerNames.Split(',')
+                                          .Select(l => l.Trim())
+                                          .Where(l => !string.IsNullOrEmpty(l))
+                                          .ToList();
+
+                if (layerList.Count == 0)
                 {
-                    new TypedValue((int)DxfCode.LayerName, layerName)
-                };
-                SelectionFilter selectionFilter = new SelectionFilter(filter);
+                    ed.WriteMessage("\nNo valid layer names provided.");
+                    return;
+                }
+
+                // Build OR filter for layers
+                List<TypedValue> filterValues = new List<TypedValue>();
+                filterValues.Add(new TypedValue((int)DxfCode.Operator, "<or"));
+
+                foreach (var layer in layerList)
+                {
+                    filterValues.Add(new TypedValue((int)DxfCode.LayerName, layer));
+                }
+
+                filterValues.Add(new TypedValue((int)DxfCode.Operator, "or>"));
+
+                SelectionFilter selectionFilter = new SelectionFilter(filterValues.ToArray());
 
                 PromptSelectionOptions pso = new PromptSelectionOptions();
-                pso.MessageForAdding = $"\nSelect an area (Window/Crossing) to remove entities on layer '{layerName}':";
+                pso.MessageForAdding =
+                    $"\nSelect an area to remove entities on layers: {string.Join(", ", layerList)}";
 
                 PromptSelectionResult selRes = ed.GetSelection(pso, selectionFilter);
 
@@ -57,32 +78,33 @@ namespace WinFormsApp1
                 }
 
                 using (doc.LockDocument())
+                using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
                 {
-                    using (Transaction tr = doc.Database.TransactionManager.StartTransaction())
+                    int erasedCount = 0;
+
+                    foreach (ObjectId id in selRes.Value.GetObjectIds())
                     {
-                        int erasedCount = 0;
+                        Entity ent = tr.GetObject(id, OpenMode.ForWrite) as Entity;
 
-                        foreach (ObjectId id in selRes.Value.GetObjectIds())
+                        if (ent != null && !ent.IsErased)
                         {
-                            Entity ent = tr.GetObject(id, OpenMode.ForWrite) as Entity;
-
-                            if (ent != null && !ent.IsErased)
-                            {
-                                ent.Erase();
-                                erasedCount++;
-                            }
+                            ent.Erase();
+                            erasedCount++;
                         }
-
-                        tr.Commit();
-                        ed.WriteMessage($"\nOperation Complete: {erasedCount} entities on layer '{layerName}' removed.");
                     }
+
+                    tr.Commit();
+                    ed.WriteMessage(
+                        $"\nOperation Complete: {erasedCount} entities removed from layers ({string.Join(", ", layerList)})."
+                    );
                 }
             }
-            catch (System.Exception ex)
+            catch (Exception ex)
             {
                 ed.WriteMessage($"\nError: {ex.Message}");
             }
         }
+
 
         private void txtLayer_TextChanged(object sender, EventArgs e)
         {
